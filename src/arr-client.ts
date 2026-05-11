@@ -139,7 +139,7 @@ export interface Movie {
   genres: string[];
   tags: number[];
   added: string;
-  ratings: { votes: number; value: number };
+  ratings: Record<string, { votes: number; value: number; type: string }>;
   movieFile?: {
     id: number;
     relativePath: string;

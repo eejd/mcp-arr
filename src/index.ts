@@ -1741,6 +1741,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   audioCodec: m.movieFile.mediaInfo?.audioCodec ?? null,
                   audioChannels: m.movieFile.mediaInfo?.audioChannels ?? null,
                 } : {}),
+                ratings: Object.fromEntries(
+                  Object.entries(m.ratings || {})
+                    .filter(([, v]) => v && v.value > 0)
+                    .map(([k, v]) => [k, v.value])
+                ),
               })),
             }, null, 2),
           }],
