@@ -86,7 +86,9 @@ const TOOLS: Tool[] = [
   {
     name: "arr_status",
     description: configuredServices.length > 0
-      ? `Get status of all configured *arr services. Currently configured: ${configuredServices.map(s => s.displayName).join(', ')}`
+      ? `Get connectivity status of all configured *arr services. Currently configured: ${configuredServices.map(s => s.displayName).join(', ')}. ` +
+        `Call this first to confirm services are reachable before library queries. ` +
+        `For library sizes (how many movies/series/artists) call the respective get tool with limit=1 — the response always includes a \`total\` field.`
       : "Get status of all supported *arr services. No local *arr services are currently configured, but TRaSH reference tools remain available.",
     inputSchema: {
       type: "object" as const,
@@ -206,7 +208,12 @@ if (clients.sonarr) {
   TOOLS.push(
     {
       name: "sonarr_get_series",
-      description: "Get TV series from Sonarr library with optional pagination and title filtering. Defaults to limit=25 to avoid very large responses. Use offset to fetch additional pages.",
+      description:
+        "Get TV series from Sonarr library with pagination and title filtering. " +
+        "Response always includes `total` (full library count regardless of limit/offset). " +
+        "Agent guidance: (1) Count queries ('how many shows?'): call with limit=1 — `total` answers the question with a minimal response. " +
+        "(2) Availability checks ('do we have Severance?'): use search='Severance' — returns only matching titles. " +
+        "(3) Listing queries: the default limit=25 is sufficient for most summaries; avoid limit>25 unless the user explicitly asks for a larger or complete list — large responses consume context window budget and slow reasoning.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -380,7 +387,12 @@ if (clients.radarr) {
   TOOLS.push(
     {
       name: "radarr_get_movies",
-      description: "Get movies from Radarr library with optional pagination and title filtering. Defaults to limit=25 to avoid very large responses. Use offset to fetch additional pages.",
+      description:
+        "Get movies from Radarr library with pagination and title filtering. " +
+        "Response always includes `total` (full library count regardless of limit/offset). " +
+        "Agent guidance: (1) Count queries ('how many movies?'): call with limit=1 — `total` answers the question with a minimal response. " +
+        "(2) Availability checks ('do we have Dune?'): use search='Dune' — returns only matching titles. " +
+        "(3) Listing queries: the default limit=25 is sufficient for most summaries; avoid limit>25 unless the user explicitly asks for a larger or complete list — large responses consume context window budget and slow reasoning.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -595,10 +607,28 @@ if (clients.lidarr) {
   TOOLS.push(
     {
       name: "lidarr_get_artists",
-      description: "Get all artists in Lidarr library",
+      description:
+        "Get artists in Lidarr library with pagination and name filtering. " +
+        "Response always includes `total` (full library count regardless of limit/offset). " +
+        "Agent guidance: (1) Count queries ('how many artists?'): call with limit=1 — `total` answers the question with a minimal response. " +
+        "(2) Availability checks ('do we have Radiohead?'): use search='Radiohead' — returns only matching artists. " +
+        "(3) Listing queries: the default limit=25 is sufficient for most summaries; avoid limit>25 unless the user explicitly asks for a larger or complete list.",
       inputSchema: {
         type: "object" as const,
-        properties: {},
+        properties: {
+          limit: {
+            type: "number",
+            description: "Maximum number of artists to return (default: 25, max: 100)",
+          },
+          offset: {
+            type: "number",
+            description: "Number of artists to skip before returning results (default: 0)",
+          },
+          search: {
+            type: "string",
+            description: "Optional case-insensitive artist name filter",
+          },
+        },
         required: [],
       },
     },
@@ -1926,13 +1956,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Lidarr handlers
       case "lidarr_get_artists": {
         if (!clients.lidarr) throw new Error("Lidarr not configured");
-        const artists = await clients.lidarr.getArtists();
+        const { limit = 25, offset = 0, search } = args as {
+          limit?: number;
+          offset?: number;
+          search?: string;
+        };
+        const normalizedLimit = Math.max(1, Math.min(limit, 100));
+        const normalizedOffset = Math.max(0, offset);
+        const filter = search?.trim().toLowerCase();
+
+        const allArtists = await clients.lidarr.getArtists();
+        const filteredArtists = filter
+          ? allArtists.filter(a => a.artistName.toLowerCase().includes(filter))
+          : allArtists;
+        const pagedArtists = filteredArtists.slice(normalizedOffset, normalizedOffset + normalizedLimit);
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
-              count: artists.length,
-              artists: artists.map(a => ({
+              total: allArtists.length,
+              filteredCount: filteredArtists.length,
+              returned: pagedArtists.length,
+              offset: normalizedOffset,
+              limit: normalizedLimit,
+              hasMore: normalizedOffset + normalizedLimit < filteredArtists.length,
+              nextOffset: normalizedOffset + normalizedLimit < filteredArtists.length
+                ? normalizedOffset + normalizedLimit
+                : null,
+              search: search ?? null,
+              artists: pagedArtists.map(a => ({
                 id: a.id,
                 artistName: a.artistName,
                 status: a.status,
