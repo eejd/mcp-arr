@@ -25,6 +25,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createServer } from "node:http";
+import path from "node:path";
 import { createRequire } from "module";
 import {
   SonarrClient,
@@ -110,6 +111,24 @@ if (clients.lidarr) registerLidarrTools(registry, clients);
 if (clients.prowlarr) registerProwlarrTools(registry, clients);
 registerTrashTools(registry, clients);
 registerConfigTools(registry, clients);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WRITE GUARD — optional safety layer (ARR_WRITE_GUARD=on)
+// Must run after all tools are registered and before the server is created.
+// Uses top-level await (ES module with "type":"module").
+// ─────────────────────────────────────────────────────────────────────────────
+
+const WRITE_GUARD_ENABLED = (process.env.ARR_WRITE_GUARD || 'off').toLowerCase() === 'on';
+if (WRITE_GUARD_ENABLED) {
+  const { applyWriteGuard } = await import('./safety/write-guard.js');
+  applyWriteGuard(registry, clients, {
+    auditPath: process.env.ARR_AUDIT_PATH || path.join(process.cwd(), 'arr-audit.jsonl'),
+    queueSaturationThreshold: Number(process.env.ARR_QUEUE_THRESHOLD || '50'),
+    cooldownMs: Number(process.env.ARR_COOLDOWN_MS || '2000'),
+    checkpointBeforeBulk: process.env.ARR_CHECKPOINT !== 'false',
+  });
+  console.error('[write-guard] ENABLED — health gate, queue gate, cooldown gate, checkpoint-before-bulk');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FLAT MODE — low-level Server, unchanged behaviour
