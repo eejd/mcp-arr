@@ -27,13 +27,28 @@ src/
     └── config.ts       # Per-service config tools (quality_profiles, health, etc.)
 ```
 
-### Tool capability groups (for progressive mode, Phase 1)
+### Tool capability groups
 Each `ToolEntry` carries a `capabilityGroup` string:
 - `"core"` — always-on: arr_status, search, fetch, arr_search_all
 - `"<svc>.library"` — read-only library queries (get_series, get_movies, …)
 - `"<svc>.writes"` — mutations and command triggers (add, update, search, refresh)
 - `"<svc>.config"` — service configuration review tools
 - `"trash"` — TRaSH Guides reference tools
+
+### Progressive mode (`ARR_TOOL_MODE=progressive`)
+Set `ARR_TOOL_MODE=progressive` (default: `flat`). **Requires stdio transport** —
+stateless HTTP always falls back to flat mode with a warning.
+
+In progressive mode the server starts with only 6 tools:
+`arr_status`, `search`, `fetch`, `arr_search_all`, `arr_discover`, `arr_activate`
+
+The agent calls `arr_discover` to list available capability groups, then
+`arr_activate({ groups: ["radarr.library", ...] })` to register them on demand.
+Each activation auto-fires a `tools/list_changed` MCP notification.
+
+Uses `McpServer` from `@modelcontextprotocol/sdk/server/mcp.js`. Discovery/activation
+logic lives in `src/tools/discovery.ts`. Zod is an explicit dep (used for arr_activate
+inputSchema validation).
 
 ## Development Commands
 
