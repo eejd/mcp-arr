@@ -10,9 +10,14 @@
  * - RADARR_URL, RADARR_API_KEY
  * - LIDARR_URL, LIDARR_API_KEY
  * - PROWLARR_URL, PROWLARR_API_KEY
+ * - ARR_TOOL_MODE=flat|progressive  (default: flat)
+ *   progressive: starts with 6 discovery tools; other tools register on demand
+ *               via arr_discover / arr_activate.  Requires stdio transport.
+ *               Stateless HTTP always falls back to flat mode.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -36,6 +41,7 @@ import { registerLidarrTools } from "./tools/lidarr.js";
 import { registerProwlarrTools } from "./tools/prowlarr.js";
 import { registerTrashTools } from "./tools/trash.js";
 import { registerConfigTools } from "./tools/config.js";
+import { registerDiscoveryTools } from "./tools/discovery.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
@@ -45,6 +51,10 @@ const TRANSPORT_MODE = (process.env.MCP_TRANSPORT || "stdio").toLowerCase();
 const HTTP_HOST = process.env.HOST || "127.0.0.1";
 const HTTP_PORT = Number(process.env.PORT || "3000");
 const HTTP_PATH = process.env.MCP_PATH || "/mcp";
+
+// ARR_TOOL_MODE: "flat" (default) or "progressive".
+// Progressive is only honoured on stdio; HTTP always runs flat.
+const ARR_TOOL_MODE_ENV = (process.env.ARR_TOOL_MODE || "flat").toLowerCase();
 
 // Configuration from environment
 interface ServiceConfig {
@@ -90,7 +100,7 @@ for (const service of configuredServices) {
   }
 }
 
-// Build tool registry
+// Build tool registry (always — used by both flat and progressive modes)
 const registry = new ToolRegistry();
 
 registerCoreTools(registry, clients, configuredServices, services);
@@ -101,8 +111,13 @@ if (clients.prowlarr) registerProwlarrTools(registry, clients);
 registerTrashTools(registry, clients);
 registerConfigTools(registry, clients);
 
-// Create server instance
-const server = new Server(
+// ─────────────────────────────────────────────────────────────────────────────
+// FLAT MODE — low-level Server, unchanged behaviour
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Create the flat-mode server instance (also used by HTTP path regardless of
+// ARR_TOOL_MODE, since stateless HTTP cannot deliver push notifications).
+const flatServer = new Server(
   {
     name: "mcp-arr",
     version: SERVER_VERSION,
@@ -115,12 +130,12 @@ const server = new Server(
 );
 
 // Handle list tools request
-server.setRequestHandler(ListToolsRequestSchema, async () => {
+flatServer.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools: registry.definitions() };
 });
 
 // Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+flatServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   try {
     const result = await registry.dispatch(name, (args ?? {}) as Record<string, unknown>);
@@ -134,8 +149,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Serializes HTTP request handling so the shared MCP `server` is only ever
-// connected to one transport at a time (see startHttpServer for why).
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP transport helper (always flat — stateless HTTP cannot push notifications)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Serializes HTTP request handling so the shared MCP `flatServer` is only ever
+// connected to one transport at a time.
 let httpQueue: Promise<unknown> = Promise.resolve();
 function runSerialized<T>(task: () => Promise<T>): Promise<T> {
   const result = httpQueue.then(task, task);
@@ -144,6 +163,12 @@ function runSerialized<T>(task: () => Promise<T>): Promise<T> {
 }
 
 async function startHttpServer() {
+  if (ARR_TOOL_MODE_ENV === "progressive") {
+    console.error(
+      "Warning: ARR_TOOL_MODE=progressive is not supported over stateless HTTP; falling back to flat mode.",
+    );
+  }
+
   const httpServer = createServer(async (req, res) => {
     if (!req.url) {
       res.statusCode = 400;
@@ -174,14 +199,14 @@ async function startHttpServer() {
     // (sessionIdGenerator: undefined). This lets MCP clients that do not echo the
     // Mcp-Session-Id header back — e.g. Claude Code — work, while a fresh transport
     // per request sidesteps the SDK 1.27.x "stateless transport cannot be reused"
-    // guard. Handling is serialized because the shared `server` can only be
+    // guard. Handling is serialized because the shared `flatServer` can only be
     // connected to one transport at a time.
     await runSerialized(async () => {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
       try {
-        await server.connect(transport);
+        await flatServer.connect(transport);
         await transport.handleRequest(req, res);
       } catch (error) {
         if (!res.headersSent) {
@@ -202,15 +227,75 @@ async function startHttpServer() {
   console.error(`*arr MCP server running over HTTP at http://${HTTP_HOST}:${HTTP_PORT}${HTTP_PATH}`);
 }
 
-// Start the server
+// ─────────────────────────────────────────────────────────────────────────────
+// PROGRESSIVE MODE — McpServer with registerTool + tools/list_changed
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function startProgressiveStdio() {
+  // McpServer auto-fires tools/list_changed whenever registerTool is called.
+  const mcpServer = new McpServer(
+    {
+      name: "mcp-arr",
+      version: SERVER_VERSION,
+    },
+    {
+      capabilities: {
+        tools: { listChanged: true },
+      },
+    },
+  );
+
+  // Set of configured service names for discovery metadata.
+  const configuredServiceNames = new Set(configuredServices.map(s => s.name as string));
+
+  // Register the 4 always-on "core" tools via McpServer so they appear at startup.
+  // McpServer.registerTool requires Zod schemas; omitting inputSchema disables
+  // SDK-level validation — args pass through as-is, same as flat mode.
+  for (const entry of registry.byGroup("core")) {
+    mcpServer.registerTool(
+      entry.definition.name,
+      { description: entry.definition.description },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      async (args: any) => {
+        const result = await entry.handler(args as Record<string, unknown>);
+        return result as { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+      },
+    );
+  }
+
+  // Register arr_discover and arr_activate (always visible in progressive mode).
+  registerDiscoveryTools(mcpServer, registry, configuredServiceNames);
+
+  // Connect via the underlying low-level Server (McpServer.server).
+  const transport = new StdioServerTransport();
+  await mcpServer.server.connect(transport);
+
+  console.error(
+    `*arr MCP server running in PROGRESSIVE mode over stdio` +
+    ` - configured services: ${configuredServices.map(s => s.name).join(', ') || 'none (TRaSH-only mode)'}` +
+    ` - initial tools: arr_status, search, fetch, arr_search_all, arr_discover, arr_activate`,
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function main() {
   if (TRANSPORT_MODE === "http") {
     await startHttpServer();
     return;
   }
 
+  // stdio: honour ARR_TOOL_MODE
+  if (ARR_TOOL_MODE_ENV === "progressive") {
+    await startProgressiveStdio();
+    return;
+  }
+
+  // Default: flat mode over stdio
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await flatServer.connect(transport);
   console.error(`*arr MCP server running over stdio - configured services: ${configuredServices.map(s => s.name).join(', ') || 'none (TRaSH-only mode)'}`);
 }
 
