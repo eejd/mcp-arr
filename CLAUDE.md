@@ -13,14 +13,27 @@ MCP server for the *arr media management suite (Sonarr, Radarr, Lidarr, Prowlarr
 
 ```
 src/
-├── index.ts          # Server entry point, tool registration
-├── tools/            # Tool implementations by service
-│   ├── sonarr.ts     # TV show management
-│   ├── radarr.ts     # Movie management
-│   ├── lidarr.ts     # Music management
-│   └── prowlarr.ts   # Indexer management
-└── types.ts          # Shared TypeScript types
+├── index.ts            # Server entry point: client init, registry wiring, transport
+├── registry.ts         # ToolRegistry: ToolEntry interface, Map-backed dispatch
+├── arr-client.ts       # HTTP clients for all *arr services (ArrClient base class)
+├── trash-client.ts     # TRaSH Guides HTTP client
+└── tools/
+    ├── core.ts         # arr_status, search, fetch, arr_search_all (always-on)
+    ├── sonarr.ts       # Sonarr TV library + write tools
+    ├── radarr.ts       # Radarr movie library + write tools
+    ├── lidarr.ts       # Lidarr music library + write tools
+    ├── prowlarr.ts     # Prowlarr indexer tools
+    ├── trash.ts        # TRaSH Guides reference tools
+    └── config.ts       # Per-service config tools (quality_profiles, health, etc.)
 ```
+
+### Tool capability groups (for progressive mode, Phase 1)
+Each `ToolEntry` carries a `capabilityGroup` string:
+- `"core"` — always-on: arr_status, search, fetch, arr_search_all
+- `"<svc>.library"` — read-only library queries (get_series, get_movies, …)
+- `"<svc>.writes"` — mutations and command triggers (add, update, search, refresh)
+- `"<svc>.config"` — service configuration review tools
+- `"trash"` — TRaSH Guides reference tools
 
 ## Development Commands
 
