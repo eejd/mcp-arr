@@ -50,6 +50,27 @@ Uses `McpServer` from `@modelcontextprotocol/sdk/server/mcp.js`. Discovery/activ
 logic lives in `src/tools/discovery.ts`. Zod is an explicit dep (used for arr_activate
 inputSchema validation).
 
+### Write-guard (`ARR_WRITE_GUARD=on`)
+Set `ARR_WRITE_GUARD=on` (default `off`) to enable the safety layer. Works with both
+flat and progressive modes. Applies to all tools where `isWrite: true`.
+
+Four-gate pipeline (fail-closed on any failure):
+1. **Health gate** — `getStatus()` + `getHealth()` before each write; blocks if service
+   unreachable or reports `type==="error"` health items. Circuit-breaker: after 3
+   consecutive failures the gate short-circuits for 60 seconds without hitting the API.
+2. **Queue saturation gate** (bulk writes only: `*_search_missing`, `*_search_movies`,
+   `arr_search_all`) — refuses when `totalRecords >= ARR_QUEUE_THRESHOLD` (default 50).
+   Directly prevents the #123 qBittorrent clog pattern.
+3. **Cooldown gate** — min `ARR_COOLDOWN_MS` (default 2000ms) between writes per service.
+4. **Checkpoint gate** (bulk writes, non-fatal) — fires `runBackupCommand()` (native arr
+   Backup API command) before bulk mutations; failure is logged but does not block.
+
+Audit log: append-only JSONL at `ARR_AUDIT_PATH` (default `./arr-audit.jsonl`).
+Each line: `{ts, tool, service, action, gate?, reason?, durationMs?}`. No args logged.
+Audit failures are silently swallowed — never crash the server.
+
+Implementation: `src/safety/write-guard.ts` + `runBackupCommand()` in `src/arr-client.ts`.
+
 ## Development Commands
 
 ```bash
