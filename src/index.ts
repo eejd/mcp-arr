@@ -24,7 +24,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { createServer } from "node:http";
+import { createServer, IncomingMessage } from "node:http";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { createRequire } from "module";
 import {
@@ -169,16 +170,98 @@ flatServer.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HTTP transport helper (always flat — stateless HTTP cannot push notifications)
+// HTTP transport — real per-session McpServer for session-aware clients,
+// with a stateless fallback preserved for header-less clients.
+//
+// This replaces the old single shared `flatServer` + `runSerialized` mutex +
+// `sessionIdGenerator: undefined` design, which caused a live outage: a
+// container restart dropped the shared server, and because no session id was
+// ever issued, session-aware MCP clients (e.g. the Python `mcp` package,
+// which expects 2025-11-25 session semantics) had no way to detect the break
+// or reconnect — every tool call silently returned empty results until the
+// *client* was also restarted. Root cause + fix are tracked in issue #1.
+//
+// BUT: going fully stateful (as 1.6.3 did) breaks clients that never echo
+// `Mcp-Session-Id` back — notably Claude Code (see CHANGELOG 1.6.5, which
+// reverted 1.6.3's stateful mode for exactly this reason). Both constraints
+// are real, so the two cases are told apart by peeking the JSON-RPC `method`
+// on requests with no (or an unrecognised) session id:
+//   - `initialize` with no session id → always issue a real Mcp-Session-Id
+//     and register a dedicated McpServer for it. Header-less clients simply
+//     ignore the header in the response; session-aware clients round-trip it
+//     on subsequent calls and get proper isolation + restart resilience.
+//   - any OTHER method with no/unrecognised session id → handled with a
+//     throwaway stateless McpServer + transport for just that request,
+//     identical to the 1.6.5 behaviour. This is what keeps Claude Code (and
+//     a session-aware client recovering from a stale session) working.
+// Each stateful session owns its own McpServer/transport pair, so concurrent
+// sessions no longer serialize through a mutex.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Serializes HTTP request handling so the shared MCP `flatServer` is only ever
-// connected to one transport at a time.
-let httpQueue: Promise<unknown> = Promise.resolve();
-function runSerialized<T>(task: () => Promise<T>): Promise<T> {
-  const result = httpQueue.then(task, task);
-  httpQueue = result.catch(() => undefined);
-  return result;
+interface HttpSession {
+  server: McpServer;
+  transport: StreamableHTTPServerTransport;
+}
+
+const sessions = new Map<string, HttpSession>();
+
+function createFlatMcpServer(): McpServer {
+  const mcpServer = new McpServer(
+    {
+      name: "mcp-arr",
+      version: SERVER_VERSION,
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    },
+  );
+
+  // McpServer.registerTool requires Zod schemas; omitting inputSchema disables
+  // SDK-level validation — args pass through as-is, matching the low-level
+  // Server + registry.dispatch behaviour this replaces (see progressive
+  // mode's identical pattern above for the "core" group).
+  for (const entry of registry.all()) {
+    mcpServer.registerTool(
+      entry.definition.name,
+      { description: entry.definition.description },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      async (args: any) => {
+        const result = await entry.handler((args ?? {}) as Record<string, unknown>);
+        return result as { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+      },
+    );
+  }
+
+  return mcpServer;
+}
+
+// Creates a new stateful session: its own McpServer + StreamableHTTPServerTransport,
+// registered into `sessions` once the transport issues a real session id.
+function createStatefulSession(): HttpSession {
+  const server = createFlatMcpServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (sid) => {
+      sessions.set(sid, { server, transport });
+    },
+    onsessionclosed: (sid) => {
+      sessions.delete(sid);
+    },
+  });
+  transport.onclose = () => {
+    if (transport.sessionId) sessions.delete(transport.sessionId);
+  };
+  return { server, transport };
+}
+
+async function readRawBody(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function startHttpServer() {
@@ -203,6 +286,7 @@ async function startHttpServer() {
         status: "ok",
         version: SERVER_VERSION,
         transport: "http",
+        activeSessions: sessions.size,
         configuredServices: configuredServices.map((service) => service.name),
       }));
       return;
@@ -214,28 +298,73 @@ async function startHttpServer() {
       return;
     }
 
-    // Stateless HTTP: a fresh transport per request, with no session id issued
-    // (sessionIdGenerator: undefined). This lets MCP clients that do not echo the
-    // Mcp-Session-Id header back — e.g. Claude Code — work, while a fresh transport
-    // per request sidesteps the SDK 1.27.x "stateless transport cannot be reused"
-    // guard. Handling is serialized because the shared `flatServer` can only be
-    // connected to one transport at a time.
-    await runSerialized(async () => {
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-      });
-      try {
-        await flatServer.connect(transport);
-        await transport.handleRequest(req, res);
-      } catch (error) {
-        if (!res.headersSent) {
-          res.statusCode = 500;
-          res.end(error instanceof Error ? error.message : String(error));
+    try {
+      const sessionIdHeader = req.headers["mcp-session-id"];
+      const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+
+      if (sessionId) {
+        const existing = sessions.get(sessionId);
+        if (existing) {
+          // Known session: route to its own McpServer/transport — no mutex
+          // needed, each session is independent.
+          await existing.transport.handleRequest(req, res);
+          return;
         }
-      } finally {
-        await transport.close();
+        // Unrecognised session id (e.g. issued by a prior process before a
+        // restart) — fall through to the no-session handling below so the
+        // client recovers instead of hitting a permanent 404/empty loop.
       }
-    });
+
+      if (req.method === "POST") {
+        // Peek the JSON-RPC method before choosing stateful vs. stateless
+        // handling — `initialize` and any other call look identical at the
+        // HTTP layer once the session header is absent.
+        const rawBody = await readRawBody(req);
+        let parsedBody: unknown;
+        try {
+          parsedBody = rawBody.length ? JSON.parse(rawBody) : undefined;
+        } catch {
+          parsedBody = undefined;
+        }
+        const rpcMethod = (parsedBody as { method?: string } | undefined)?.method;
+
+        if (rpcMethod === "initialize") {
+          const session = createStatefulSession();
+          await session.transport.handleRequest(req, res, parsedBody);
+          return;
+        }
+
+        // Non-initialize call with no/unrecognised session id: either a
+        // header-less client (Claude Code) or a session-aware client
+        // recovering from a stale session. Handle with a throwaway
+        // stateless transport — the 1.6.5 behaviour — rather than the SDK's
+        // stateful "400 Mcp-Session-Id header is required" rejection.
+        const statelessServer = createFlatMcpServer();
+        const statelessTransport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: undefined,
+        });
+        try {
+          await statelessServer.connect(statelessTransport);
+          await statelessTransport.handleRequest(req, res, parsedBody);
+        } finally {
+          await statelessTransport.close();
+        }
+        return;
+      }
+
+      // GET (SSE resume) / DELETE (session close) with no recognised
+      // session: no JSON-RPC body to inspect, and neither is part of the
+      // header-less-client compatibility case above — attempt a fresh
+      // stateful session, which cleanly fails if the client expected an
+      // existing one.
+      const session = createStatefulSession();
+      await session.transport.handleRequest(req, res);
+    } catch (error) {
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end(error instanceof Error ? error.message : String(error));
+      }
+    }
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -243,7 +372,7 @@ async function startHttpServer() {
     httpServer.listen(HTTP_PORT, HTTP_HOST, () => resolve());
   });
 
-  console.error(`*arr MCP server running over HTTP at http://${HTTP_HOST}:${HTTP_PORT}${HTTP_PATH}`);
+  console.error(`*arr MCP server running over HTTP at http://${HTTP_HOST}:${HTTP_PORT}${HTTP_PATH} (real sessions for session-aware clients; stateless fallback preserved for header-less clients)`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
