@@ -13,14 +13,63 @@ MCP server for the *arr media management suite (Sonarr, Radarr, Lidarr, Prowlarr
 
 ```
 src/
-├── index.ts          # Server entry point, tool registration
-├── tools/            # Tool implementations by service
-│   ├── sonarr.ts     # TV show management
-│   ├── radarr.ts     # Movie management
-│   ├── lidarr.ts     # Music management
-│   └── prowlarr.ts   # Indexer management
-└── types.ts          # Shared TypeScript types
+├── index.ts            # Server entry point: client init, registry wiring, transport
+├── registry.ts         # ToolRegistry: ToolEntry interface, Map-backed dispatch
+├── arr-client.ts       # HTTP clients for all *arr services (ArrClient base class)
+├── trash-client.ts     # TRaSH Guides HTTP client
+└── tools/
+    ├── core.ts         # arr_status, search, fetch, arr_search_all (always-on)
+    ├── sonarr.ts       # Sonarr TV library + write tools
+    ├── radarr.ts       # Radarr movie library + write tools
+    ├── lidarr.ts       # Lidarr music library + write tools
+    ├── prowlarr.ts     # Prowlarr indexer tools
+    ├── trash.ts        # TRaSH Guides reference tools
+    └── config.ts       # Per-service config tools (quality_profiles, health, etc.)
 ```
+
+### Tool capability groups
+Each `ToolEntry` carries a `capabilityGroup` string:
+- `"core"` — always-on: arr_status, search, fetch, arr_search_all
+- `"<svc>.library"` — read-only library queries (get_series, get_movies, …)
+- `"<svc>.writes"` — mutations and command triggers (add, update, search, refresh)
+- `"<svc>.config"` — service configuration review tools
+- `"trash"` — TRaSH Guides reference tools
+
+### Progressive mode (`ARR_TOOL_MODE=progressive`)
+Set `ARR_TOOL_MODE=progressive` (default: `flat`). **Requires stdio transport** —
+stateless HTTP always falls back to flat mode with a warning.
+
+In progressive mode the server starts with only 6 tools:
+`arr_status`, `search`, `fetch`, `arr_search_all`, `arr_discover`, `arr_activate`
+
+The agent calls `arr_discover` to list available capability groups, then
+`arr_activate({ groups: ["radarr.library", ...] })` to register them on demand.
+Each activation auto-fires a `tools/list_changed` MCP notification.
+
+Uses `McpServer` from `@modelcontextprotocol/sdk/server/mcp.js`. Discovery/activation
+logic lives in `src/tools/discovery.ts`. Zod is an explicit dep (used for arr_activate
+inputSchema validation).
+
+### Write-guard (`ARR_WRITE_GUARD=on`)
+Set `ARR_WRITE_GUARD=on` (default `off`) to enable the safety layer. Works with both
+flat and progressive modes. Applies to all tools where `isWrite: true`.
+
+Four-gate pipeline (fail-closed on any failure):
+1. **Health gate** — `getStatus()` + `getHealth()` before each write; blocks if service
+   unreachable or reports `type==="error"` health items. Circuit-breaker: after 3
+   consecutive failures the gate short-circuits for 60 seconds without hitting the API.
+2. **Queue saturation gate** (bulk writes only: `*_search_missing`, `*_search_movies`,
+   `arr_search_all`) — refuses when `totalRecords >= ARR_QUEUE_THRESHOLD` (default 50).
+   Directly prevents the #123 qBittorrent clog pattern.
+3. **Cooldown gate** — min `ARR_COOLDOWN_MS` (default 2000ms) between writes per service.
+4. **Checkpoint gate** (bulk writes, non-fatal) — fires `runBackupCommand()` (native arr
+   Backup API command) before bulk mutations; failure is logged but does not block.
+
+Audit log: append-only JSONL at `ARR_AUDIT_PATH` (default `./arr-audit.jsonl`).
+Each line: `{ts, tool, service, action, gate?, reason?, durationMs?}`. No args logged.
+Audit failures are silently swallowed — never crash the server.
+
+Implementation: `src/safety/write-guard.ts` + `runBackupCommand()` in `src/arr-client.ts`.
 
 ## Development Commands
 

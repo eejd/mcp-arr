@@ -545,6 +545,17 @@ export class ArrClient {
   async getIndexers(): Promise<Indexer[]> {
     return this.request<Indexer[]>('/indexer');
   }
+
+  /**
+   * Trigger a backup via the /command endpoint.
+   * Used by the write-guard to create a checkpoint before bulk write operations.
+   */
+  async runBackupCommand(): Promise<{ id: number; status: string }> {
+    return this.request<{ id: number; status: string }>('/command', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Backup' }),
+    });
+  }
 }
 
 // Service-specific clients
