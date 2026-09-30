@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- HTTP transport: every `initialize` hung. The per-session `McpServer` was never connected to its `StreamableHTTPServerTransport`, so the server sent SSE headers and a session id but never a result, and clients such as Claude Code timed out. The session is now connected before its first request is handled. The HTTP tests now read the response bodies with a deadline, and CI runs `npm test`, which gates the image publish.
+
 ## [1.6.5] - 2026-06-11
 
 ### Fixed
