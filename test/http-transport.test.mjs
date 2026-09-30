@@ -161,7 +161,8 @@ test("HTTP transport issues a real session id and routes same-session requests t
     assert.notEqual(secondSessionId, sessionId, "sessions must not be shared across independent clients");
 
     // GET/DELETE with an unknown session id must be answered promptly with a
-    // client error. Before the connect fix this path hung like initialize did.
+    // client error, and the throwaway transport built to answer it must not
+    // leak into the session map (the activeSessions check below).
     for (const method of ["GET", "DELETE"]) {
       const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
         method,
