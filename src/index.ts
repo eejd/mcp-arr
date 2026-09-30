@@ -239,7 +239,14 @@ function createFlatMcpServer(): McpServer {
 
 // Creates a new stateful session: its own McpServer + StreamableHTTPServerTransport,
 // registered into `sessions` once the transport issues a real session id.
-function createStatefulSession(): HttpSession {
+//
+// The server MUST be connected to the transport before the first
+// handleRequest. Without that the transport accepts the request, sends the
+// SSE headers and a session id, and then never answers, because no server is
+// listening on it. Every `initialize` hung that way until this fix. See the
+// SDK's own simpleStreamableHttp example: "Connect the transport to the MCP
+// server BEFORE handling the request".
+async function createStatefulSession(): Promise<HttpSession> {
   const server = createFlatMcpServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
@@ -253,6 +260,7 @@ function createStatefulSession(): HttpSession {
   transport.onclose = () => {
     if (transport.sessionId) sessions.delete(transport.sessionId);
   };
+  await server.connect(transport);
   return { server, transport };
 }
 
@@ -329,7 +337,7 @@ async function startHttpServer() {
         const rpcMethod = (parsedBody as { method?: string } | undefined)?.method;
 
         if (rpcMethod === "initialize") {
-          const session = createStatefulSession();
+          const session = await createStatefulSession();
           await session.transport.handleRequest(req, res, parsedBody);
           return;
         }
@@ -357,7 +365,7 @@ async function startHttpServer() {
       // header-less-client compatibility case above — attempt a fresh
       // stateful session, which cleanly fails if the client expected an
       // existing one.
-      const session = createStatefulSession();
+      const session = await createStatefulSession();
       await session.transport.handleRequest(req, res);
     } catch (error) {
       if (!res.headersSent) {

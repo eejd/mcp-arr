@@ -33,6 +33,13 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      # The suite was never run in CI, so the HTTP-transport tests could not
+      # catch the initialize hang shipped in the 2026-07-03 image. The image
+      # publish job needs this one, so a failing test now blocks it.
+      - name: Test
+        run: npm test
+        timeout-minutes: 5
+
   security:
     runs-on: ubuntu-latest
     steps:

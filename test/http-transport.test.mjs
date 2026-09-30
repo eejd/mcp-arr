@@ -44,6 +44,7 @@ test("HTTP transport serves clients that omit the session header (stateless)", a
       },
     });
     assert.equal(initializeResponse.status, 200);
+    assert.match(await initializeResponse.text(), /"serverInfo"/);
 
     // tools/list WITHOUT the Mcp-Session-Id header — the exact request the old
     // stateful transport rejected with 400. Must now succeed.
@@ -118,6 +119,11 @@ test("HTTP transport issues a real session id and routes same-session requests t
     assert.equal(initializeResponse.status, 200);
     const sessionId = initializeResponse.headers.get("mcp-session-id");
     assert.ok(sessionId, "initialize must return a real Mcp-Session-Id header");
+    // The initialize RESULT must arrive, not just the headers. Before the
+    // server.connect fix the headers came back and the body never did.
+    const initializeBody = await initializeResponse.text();
+    assert.match(initializeBody, /"serverInfo"/);
+    assert.match(initializeBody, /"name":"mcp-arr"/);
 
     // tools/list WITH the issued session id must succeed, routed to the
     // same session's McpServer.
@@ -149,6 +155,7 @@ test("HTTP transport issues a real session id and routes same-session requests t
       },
     });
     assert.equal(secondClientInit.status, 200);
+    assert.match(await secondClientInit.text(), /"serverInfo"/);
     const secondSessionId = secondClientInit.headers.get("mcp-session-id");
     assert.ok(secondSessionId, "a second, independent client must get its own session id");
     assert.notEqual(secondSessionId, sessionId, "sessions must not be shared across independent clients");
@@ -178,9 +185,14 @@ async function waitForHealth(port) {
   throw new Error(`HTTP server did not become healthy: ${lastError}`);
 }
 
+const RESPONSE_DEADLINE_MS = 5000;
+
 function postMcp(port, payload, sessionId) {
   return fetch(`http://127.0.0.1:${port}/mcp`, {
     method: "POST",
+    // Covers headers AND body: a response that sends headers but never a
+    // result (the missing server.connect bug) aborts instead of hanging.
+    signal: AbortSignal.timeout(RESPONSE_DEADLINE_MS),
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
