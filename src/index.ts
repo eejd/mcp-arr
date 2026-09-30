@@ -338,7 +338,14 @@ async function startHttpServer() {
 
         if (rpcMethod === "initialize") {
           const session = await createStatefulSession();
-          await session.transport.handleRequest(req, res, parsedBody);
+          try {
+            await session.transport.handleRequest(req, res, parsedBody);
+          } catch (error) {
+            // A failed initialize must not leave a half-registered session:
+            // close() fires onclose, which drops it from `sessions`.
+            await session.transport.close();
+            throw error;
+          }
           return;
         }
 
@@ -364,9 +371,15 @@ async function startHttpServer() {
       // session: no JSON-RPC body to inspect, and neither is part of the
       // header-less-client compatibility case above — attempt a fresh
       // stateful session, which cleanly fails if the client expected an
-      // existing one.
+      // existing one. That session is never initialized, so the SDK always
+      // rejects the request; close it afterwards or every such request
+      // leaks a connected McpServer + transport.
       const session = await createStatefulSession();
-      await session.transport.handleRequest(req, res);
+      try {
+        await session.transport.handleRequest(req, res);
+      } finally {
+        await session.transport.close();
+      }
     } catch (error) {
       if (!res.headersSent) {
         res.statusCode = 500;
