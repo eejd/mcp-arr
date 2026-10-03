@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `MCP_ARR_TOOLS`: optional comma-separated tool allowlist for running a restricted (e.g. read-only) instance, since the *arr APIs have no read-only keys. Tools outside the list are removed from the registry, so they are absent from `tools/list` and rejected by `tools/call` on every transport. An unknown name fails startup. `/health` now reports `toolCount` and `toolAllowlist`.
+
 ### Fixed
 - HTTP transport: every `initialize` hung. The per-session `McpServer` was never connected to its `StreamableHTTPServerTransport`, so the server sent SSE headers and a session id but never a result, and clients such as Claude Code timed out. The session is now connected before its first request is handled. The HTTP tests now read the response bodies with a deadline, and CI runs `npm test`, which gates the image publish.
 

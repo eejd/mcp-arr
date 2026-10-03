@@ -15,6 +15,10 @@ export class ToolRegistry {
     this.entries.set(entry.definition.name, entry);
   }
 
+  remove(name: string): boolean {
+    return this.entries.delete(name);
+  }
+
   get(name: string): ToolEntry | undefined {
     return this.entries.get(name);
   }
