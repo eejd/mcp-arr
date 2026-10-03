@@ -10,6 +10,10 @@
  * - RADARR_URL, RADARR_API_KEY
  * - LIDARR_URL, LIDARR_API_KEY
  * - PROWLARR_URL, PROWLARR_API_KEY
+ * - MCP_ARR_TOOLS=name1,name2,...   (default: unset = all tools; set-but-blank fails startup;
+ *   not supported with ARR_TOOL_MODE=progressive)
+ *   Restricts the server to exactly these tools at tools/list and tools/call.
+ *   An unknown name fails startup. Use it to run a read-only instance.
  * - ARR_TOOL_MODE=flat|progressive  (default: flat)
  *   progressive: starts with 6 discovery tools; other tools register on demand
  *               via arr_discover / arr_activate.  Requires stdio transport.
@@ -36,6 +40,7 @@ import {
   ArrService,
 } from "./arr-client.js";
 import { ToolRegistry } from "./registry.js";
+import { parseToolAllowlist, applyToolAllowlist } from "./allowlist.js";
 import { registerCoreTools } from "./tools/core.js";
 import { registerSonarrTools } from "./tools/sonarr.js";
 import { registerRadarrTools } from "./tools/radarr.js";
@@ -112,6 +117,20 @@ if (clients.lidarr) registerLidarrTools(registry, clients);
 if (clients.prowlarr) registerProwlarrTools(registry, clients);
 registerTrashTools(registry, clients);
 registerConfigTools(registry, clients);
+
+// MCP_ARR_TOOLS: optional comma-separated tool allowlist (e.g. a read-only
+// instance). Applied before the write guard so it wraps only surviving tools.
+// An unknown name throws here and fails startup.
+const TOOL_ALLOWLIST = parseToolAllowlist(process.env.MCP_ARR_TOOLS);
+if (TOOL_ALLOWLIST && ARR_TOOL_MODE_ENV === "progressive") {
+  // arr_discover/arr_activate sit outside the registry and would advertise
+  // pruned tools; the allowlist is for the flat/HTTP deployment.
+  throw new Error("MCP_ARR_TOOLS is not supported with ARR_TOOL_MODE=progressive");
+}
+const activeTools = applyToolAllowlist(registry, TOOL_ALLOWLIST);
+if (TOOL_ALLOWLIST) {
+  console.error(`[allowlist] MCP_ARR_TOOLS active — ${activeTools.length} tools: ${activeTools.join(", ")}`);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WRITE GUARD — optional safety layer (ARR_WRITE_GUARD=on)
@@ -295,6 +314,8 @@ async function startHttpServer() {
         version: SERVER_VERSION,
         transport: "http",
         activeSessions: sessions.size,
+        toolCount: registry.all().length,
+        toolAllowlist: TOOL_ALLOWLIST !== null,
         configuredServices: configuredServices.map((service) => service.name),
       }));
       return;

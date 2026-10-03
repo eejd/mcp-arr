@@ -96,6 +96,7 @@ node dist/index.js
 | LIDARR_API_KEY | For Lidarr | API key |
 | PROWLARR_URL | For Prowlarr | Base URL |
 | PROWLARR_API_KEY | For Prowlarr | API key |
+| MCP_ARR_TOOLS | No | Comma-separated tool allowlist (unset = all tools). Enforced at tools/list and tools/call; an unknown name fails startup. Use for a read-only instance. |
 
 ## Constraints
 
