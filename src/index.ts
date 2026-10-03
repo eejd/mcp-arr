@@ -10,7 +10,8 @@
  * - RADARR_URL, RADARR_API_KEY
  * - LIDARR_URL, LIDARR_API_KEY
  * - PROWLARR_URL, PROWLARR_API_KEY
- * - MCP_ARR_TOOLS=name1,name2,...   (default: unset = all tools)
+ * - MCP_ARR_TOOLS=name1,name2,...   (default: unset = all tools; set-but-blank fails startup;
+ *   not supported with ARR_TOOL_MODE=progressive)
  *   Restricts the server to exactly these tools at tools/list and tools/call.
  *   An unknown name fails startup. Use it to run a read-only instance.
  * - ARR_TOOL_MODE=flat|progressive  (default: flat)
@@ -121,6 +122,11 @@ registerConfigTools(registry, clients);
 // instance). Applied before the write guard so it wraps only surviving tools.
 // An unknown name throws here and fails startup.
 const TOOL_ALLOWLIST = parseToolAllowlist(process.env.MCP_ARR_TOOLS);
+if (TOOL_ALLOWLIST && ARR_TOOL_MODE_ENV === "progressive") {
+  // arr_discover/arr_activate sit outside the registry and would advertise
+  // pruned tools; the allowlist is for the flat/HTTP deployment.
+  throw new Error("MCP_ARR_TOOLS is not supported with ARR_TOOL_MODE=progressive");
+}
 const activeTools = applyToolAllowlist(registry, TOOL_ALLOWLIST);
 if (TOOL_ALLOWLIST) {
   console.error(`[allowlist] MCP_ARR_TOOLS active — ${activeTools.length} tools: ${activeTools.join(", ")}`);

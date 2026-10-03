@@ -199,7 +199,7 @@ The *arr APIs have no read-only keys, so the restriction lives in this server. S
 MCP_ARR_TOOLS=arr_status,radarr_get_movies,sonarr_get_series
 ```
 
-Other tools are absent from `tools/list` and rejected by `tools/call`, on every transport. Unset or empty means all tools. A name that is not a registered tool fails startup, so a typo cannot silently widen or empty the set. Tools of a service whose URL/key are unset are not registered and cannot be listed. `/health` reports `toolAllowlist` and `toolCount`.
+Other tools are absent from `tools/list` and rejected by `tools/call`, on every transport. Unset means all tools; a value that is set but names nothing fails startup rather than serving everything. A name that is not a registered tool fails startup, so a typo cannot silently widen or empty the set. Not supported with `ARR_TOOL_MODE=progressive`. The list is per tool name: `search`, `fetch` and `arr_search_all` query every configured service, and `arr_status` can include internal URLs in error text, so list only what the instance should expose. Tools of a service whose URL/key are unset are not registered and cannot be listed. `/health` reports `toolAllowlist` and `toolCount`.
 
 ## ChatGPT / Remote MCP
 

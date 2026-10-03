@@ -198,6 +198,8 @@ test("MCP_ARR_TOOLS limits tools/list and rejects hidden tools on tools/call", a
       RADARR_URL: "http://127.0.0.1:1",
       RADARR_API_KEY: "test-key",
       MCP_ARR_TOOLS: "arr_status, radarr_get_movies",
+      ARR_WRITE_GUARD: "off",
+      ARR_TOOL_MODE: "flat",
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -224,8 +226,22 @@ test("MCP_ARR_TOOLS limits tools/list and rejects hidden tools on tools/call", a
     assert.doesNotMatch(listBody, /radarr_add_movie|"search"|trash_/);
 
     const callBody = await (await postMcp(port, addCall)).text();
-    assert.match(callBody, /"error"|"isError":true/);
+    assert.match(callBody, /not found|Unknown tool/i);
     assert.match(callBody, /radarr_add_movie/);
+    for (const hidden of ["search", "fetch", "arr_search_all"]) {
+      const body = await (await postMcp(port, {
+        jsonrpc: "2.0", id: 10, method: "tools/call",
+        params: { name: hidden, arguments: { term: "x", id: "x" } },
+      })).text();
+      assert.match(body, /not found|Unknown tool/i, `${hidden} must be rejected`);
+    }
+    // positive control: an allowed tool still dispatches
+    const okBody = await (await postMcp(port, {
+      jsonrpc: "2.0", id: 11, method: "tools/call",
+      params: { name: "arr_status", arguments: {} },
+    })).text();
+    assert.doesNotMatch(okBody, /not found|Unknown tool/i);
+    assert.match(okBody, /"result"/);
 
     // per-session
     const init = await postMcp(port, {
@@ -244,14 +260,19 @@ test("MCP_ARR_TOOLS limits tools/list and rejects hidden tools on tools/call", a
     const sessList = await (await postMcp(port, toolsList, sessionId)).text();
     assert.doesNotMatch(sessList, /radarr_add_movie/);
     const sessCall = await (await postMcp(port, addCall, sessionId)).text();
-    assert.match(sessCall, /"error"|"isError":true/);
+    assert.match(sessCall, /not found|Unknown tool/i);
+    const sessOk = await (await postMcp(port, {
+      jsonrpc: "2.0", id: 12, method: "tools/call",
+      params: { name: "arr_status", arguments: {} },
+    }, sessionId)).text();
+    assert.doesNotMatch(sessOk, /not found|Unknown tool/i);
   } finally {
     child.kill("SIGTERM");
     await once(child, "exit").catch(() => {});
   }
 });
 
-test("MCP_ARR_TOOLS naming an unknown tool fails startup", async () => {
+async function expectStartupFailure(env, pattern) {
   const child = spawn(process.execPath, ["dist/index.js"], {
     cwd: new URL("..", import.meta.url),
     env: {
@@ -259,16 +280,38 @@ test("MCP_ARR_TOOLS naming an unknown tool fails startup", async () => {
       MCP_TRANSPORT: "http",
       HOST: "127.0.0.1",
       PORT: String(34500 + Math.floor(Math.random() * 500)),
-      MCP_ARR_TOOLS: "arr_status,not_a_tool",
+      ARR_WRITE_GUARD: "off",
+      ...env,
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (c) => { stderr += c; });
-  const [code] = await once(child, "exit");
+  const timer = setTimeout(() => child.kill("SIGKILL"), RESPONSE_DEADLINE_MS);
+  const [code, signal] = await once(child, "exit");
+  clearTimeout(timer);
+  assert.equal(signal, null, "server kept running instead of failing startup");
   assert.notEqual(code, 0);
-  assert.match(stderr, /unknown tool\(s\): not_a_tool/);
+  assert.match(stderr, pattern);
+}
+
+test("MCP_ARR_TOOLS naming an unknown tool fails startup", async () => {
+  await expectStartupFailure(
+    { MCP_ARR_TOOLS: "arr_status,not_a_tool" },
+    /unknown tool\(s\): not_a_tool/,
+  );
+});
+
+test("MCP_ARR_TOOLS set but blank fails startup (never fails open)", async () => {
+  await expectStartupFailure({ MCP_ARR_TOOLS: " , " }, /names no tools/);
+});
+
+test("MCP_ARR_TOOLS is rejected with ARR_TOOL_MODE=progressive", async () => {
+  await expectStartupFailure(
+    { MCP_ARR_TOOLS: "arr_status", ARR_TOOL_MODE: "progressive" },
+    /not supported with ARR_TOOL_MODE=progressive/,
+  );
 });
 
 async function waitForHealth(port) {

@@ -9,14 +9,23 @@
 
 import type { ToolRegistry } from "./registry.js";
 
-/** Parse a comma-separated list. Unset/empty/blank means "all tools" (null). */
+/**
+ * Parse a comma-separated list. Unset means "all tools" (null). A variable that
+ * is set but names nothing (empty, whitespace, only commas) throws: it must not
+ * fail open to the full tool set on an instance meant to be restricted.
+ */
 export function parseToolAllowlist(raw: string | undefined): Set<string> | null {
   if (raw === undefined) return null;
   const names = raw
     .split(",")
     .map((n) => n.trim())
     .filter((n) => n.length > 0);
-  return names.length === 0 ? null : new Set(names);
+  if (names.length === 0) {
+    throw new Error(
+      "MCP_ARR_TOOLS is set but names no tools; unset it to serve all tools",
+    );
+  }
+  return new Set(names);
 }
 
 /**
@@ -35,7 +44,7 @@ export function applyToolAllowlist(
   const unknown = [...allow].filter((n) => !known.has(n)).sort();
   if (unknown.length > 0) {
     throw new Error(
-      `MCP_ARR_TOOLS names unknown tool(s): ${unknown.join(", ")}`,
+      `MCP_ARR_TOOLS names unknown tool(s): ${unknown.join(", ")} (not registered; is the service's URL and API key set?)`,
     );
   }
   for (const name of registered) {

@@ -24,10 +24,14 @@ function buildRegistry() {
 }
 
 describe("parseToolAllowlist", () => {
-  it("treats unset, empty and blank as all tools", () => {
+  it("treats unset as all tools", () => {
     assert.equal(parseToolAllowlist(undefined), null);
-    assert.equal(parseToolAllowlist(""), null);
-    assert.equal(parseToolAllowlist(" , ,"), null);
+  });
+
+  it("throws when set but naming nothing (never fails open)", () => {
+    for (const raw of ["", "  ", " , ,"]) {
+      assert.throws(() => parseToolAllowlist(raw), /names no tools/);
+    }
   });
 
   it("trims whitespace and dedupes", () => {
