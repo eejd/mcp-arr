@@ -143,6 +143,7 @@ const WRITE_TOOLS = new Set([
   "radarr_update_movie", "radarr_delete_queue_item", "radarr_search_movies",
   "lidarr_search_album", "lidarr_search_missing", "lidarr_add_artist",
   "prowlarr_search",
+  "prowlarr_test_indexers", // POSTs /indexer/testall
 ]);
 
 // Tools that MUST carry isWrite: false (a representative subset)
@@ -151,7 +152,7 @@ const READONLY_TOOLS = new Set([
   "sonarr_get_series", "sonarr_search", "sonarr_get_queue", "sonarr_get_calendar", "sonarr_get_episodes",
   "radarr_get_movies", "radarr_search", "radarr_get_queue", "radarr_get_calendar",
   "lidarr_get_artists", "lidarr_search", "lidarr_get_queue", "lidarr_get_albums",
-  "prowlarr_get_indexers", "prowlarr_test_indexers", "prowlarr_get_stats",
+  "prowlarr_get_indexers", "prowlarr_get_stats",
 ]);
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -238,5 +239,33 @@ describe("ToolRegistry", () => {
       assert.equal(defs.length, registry.all().length);
       assert.ok(defs.every((d) => typeof d.name === "string" && d.name.length > 0));
     });
+  });
+});
+
+
+describe("readOnlyHint annotations (eejd/mcp-arr#11)", () => {
+  it("every tool is annotated readOnlyHint === !isWrite", () => {
+    const registry = buildRegistry();
+    for (const e of registry.all()) {
+      assert.equal(typeof e.definition.annotations?.readOnlyHint, "boolean", e.definition.name);
+      assert.equal(e.definition.annotations.readOnlyHint, !e.isWrite, e.definition.name);
+    }
+    assert.ok(registry.all().some((e) => e.isWrite) && registry.all().some((e) => !e.isWrite));
+  });
+
+  it("an explicit annotation wins for a read tool, but never lets a write tool claim readOnlyHint", () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      definition: { name: "x", description: "x", inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true, title: "X" } },
+      handler: async () => ({}), capabilityGroup: "core", isWrite: true, alwaysOn: false,
+    });
+    assert.deepEqual(registry.get("x").definition.annotations, { readOnlyHint: false, title: "X" });
+    registry.register({
+      definition: { name: "y", description: "y", inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: false, title: "Y" } },
+      handler: async () => ({}), capabilityGroup: "core", isWrite: false, alwaysOn: false,
+    });
+    assert.deepEqual(registry.get("y").definition.annotations, { readOnlyHint: false, title: "Y" });
   });
 });

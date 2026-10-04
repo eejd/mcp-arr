@@ -154,42 +154,51 @@ if (WRITE_GUARD_ENABLED) {
 // FLAT MODE — low-level Server, unchanged behaviour
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Create the flat-mode server instance (also used by HTTP path regardless of
-// ARR_TOOL_MODE, since stateless HTTP cannot deliver push notifications).
-const flatServer = new Server(
-  {
-    name: "mcp-arr",
-    version: SERVER_VERSION,
-  },
-  {
-    capabilities: {
-      tools: {},
+// Build a flat-mode low-level Server driven by the registry. Used for stdio (one instance) and for
+// every HTTP session / stateless request (one instance each, since a Server connects to one
+// transport). tools/list returns registry.definitions(), i.e. the real inputSchema and the
+// readOnlyHint annotation; McpServer.registerTool without a Zod schema would advertise
+// `properties: {}` for every tool (eejd/mcp-arr#11).
+function buildFlatServer(): Server {
+  const server = new Server(
+    {
+      name: "mcp-arr",
+      version: SERVER_VERSION,
     },
-  }
-);
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
 
-// Handle list tools request
-flatServer.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: registry.definitions() };
-});
+  // Handle list tools request
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return { tools: registry.definitions() };
+  });
 
-// Handle tool calls
-flatServer.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  try {
-    const result = await registry.dispatch(name, (args ?? {}) as Record<string, unknown>);
-    return result as { content: Array<{ type: string; text: string }>; isError?: boolean };
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return {
-      content: [{ type: "text" as const, text: `Error: ${errorMessage}` }],
-      isError: true,
-    };
-  }
-});
+  // Handle tool calls
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      const result = await registry.dispatch(name, (args ?? {}) as Record<string, unknown>);
+      return result as { content: Array<{ type: string; text: string }>; isError?: boolean };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{ type: "text" as const, text: `Error: ${errorMessage}` }],
+        isError: true,
+      };
+    }
+  });
+
+  return server;
+}
+
+const flatServer = buildFlatServer();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HTTP transport — real per-session McpServer for session-aware clients,
+// HTTP transport — real per-session Server for session-aware clients,
 // with a stateless fallback preserved for header-less clients.
 //
 // This replaces the old single shared `flatServer` + `runSerialized` mutex +
@@ -206,57 +215,29 @@ flatServer.setRequestHandler(CallToolRequestSchema, async (request) => {
 // are real, so the two cases are told apart by peeking the JSON-RPC `method`
 // on requests with no (or an unrecognised) session id:
 //   - `initialize` with no session id → always issue a real Mcp-Session-Id
-//     and register a dedicated McpServer for it. Header-less clients simply
+//     and register a dedicated Server for it. Header-less clients simply
 //     ignore the header in the response; session-aware clients round-trip it
 //     on subsequent calls and get proper isolation + restart resilience.
 //   - any OTHER method with no/unrecognised session id → handled with a
-//     throwaway stateless McpServer + transport for just that request,
+//     throwaway stateless Server + transport for just that request,
 //     identical to the 1.6.5 behaviour. This is what keeps Claude Code (and
 //     a session-aware client recovering from a stale session) working.
-// Each stateful session owns its own McpServer/transport pair, so concurrent
+// Each stateful session owns its own Server/transport pair, so concurrent
 // sessions no longer serialize through a mutex.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface HttpSession {
-  server: McpServer;
+  server: Server;
   transport: StreamableHTTPServerTransport;
 }
 
 const sessions = new Map<string, HttpSession>();
 
-function createFlatMcpServer(): McpServer {
-  const mcpServer = new McpServer(
-    {
-      name: "mcp-arr",
-      version: SERVER_VERSION,
-    },
-    {
-      capabilities: {
-        tools: {},
-      },
-    },
-  );
-
-  // McpServer.registerTool requires Zod schemas; omitting inputSchema disables
-  // SDK-level validation — args pass through as-is, matching the low-level
-  // Server + registry.dispatch behaviour this replaces (see progressive
-  // mode's identical pattern above for the "core" group).
-  for (const entry of registry.all()) {
-    mcpServer.registerTool(
-      entry.definition.name,
-      { description: entry.definition.description },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      async (args: any) => {
-        const result = await entry.handler((args ?? {}) as Record<string, unknown>);
-        return result as { content: Array<{ type: "text"; text: string }>; isError?: boolean };
-      },
-    );
-  }
-
-  return mcpServer;
+function createFlatMcpServer(): Server {
+  return buildFlatServer();
 }
 
-// Creates a new stateful session: its own McpServer + StreamableHTTPServerTransport,
+// Creates a new stateful session: its own Server + StreamableHTTPServerTransport,
 // registered into `sessions` once the transport issues a real session id.
 //
 // The server MUST be connected to the transport before the first
@@ -334,7 +315,7 @@ async function startHttpServer() {
       if (sessionId) {
         const existing = sessions.get(sessionId);
         if (existing) {
-          // Known session: route to its own McpServer/transport — no mutex
+          // Known session: route to its own Server/transport — no mutex
           // needed, each session is independent.
           await existing.transport.handleRequest(req, res);
           return;
@@ -394,7 +375,7 @@ async function startHttpServer() {
       // stateful session, which cleanly fails if the client expected an
       // existing one. That session is never initialized, so the SDK always
       // rejects the request; close it afterwards or every such request
-      // leaks a connected McpServer + transport.
+      // leaks a connected Server + transport.
       const session = await createStatefulSession();
       try {
         await session.transport.handleRequest(req, res);

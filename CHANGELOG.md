@@ -7,11 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-- `MCP_ARR_TOOLS`: optional comma-separated tool allowlist for running a restricted (e.g. read-only) instance, since the *arr APIs have no read-only keys. Tools outside the list are removed from the registry, so they are absent from `tools/list` and rejected by `tools/call` on every transport. An unknown name, or a set-but-blank value, fails startup (never fails open); not supported with `ARR_TOOL_MODE=progressive`. `/health` now reports `toolCount` and `toolAllowlist`.
+## [1.7.0] - 2026-10-04
 
 ### Fixed
+- **HTTP tool calls received no arguments.** Since the per-session `McpServer` change, tools were registered with `registerTool` and no schema; in SDK 1.29 the handler is then invoked with the request-extra object instead of the tool arguments. Every tool call over HTTP (session and stateless) therefore ran with arguments dropped, e.g. `fetch {"id":"zzz:1"}` failed with `Cannot read properties of undefined`. **Deployers:** write tools on a full instance (`radarr_add_movie`, `*_search_missing`, …) were effectively inert over HTTP and become live after this release; keep `ARR_WRITE_GUARD` on or use `MCP_ARR_TOOLS` where that is not wanted.
+- HTTP `tools/list` advertised an empty `inputSchema` for every tool, for the same reason; a model saw no parameters. HTTP sessions and stateless requests are now served by a low-level `Server` driven by the registry (`definitions()` / `dispatch()`), as stdio flat mode already was. Unknown tools answer `Error: Unknown tool: <name>` (still an `isError` result; only the text changed), and the `tools.listChanged` capability is no longer advertised in flat mode. Progressive stdio mode still uses `registerTool` without schemas and has the same defect; it is unchanged (tracked in #13). (#11)
 - HTTP transport: every `initialize` hung. The per-session `McpServer` was never connected to its `StreamableHTTPServerTransport`, so the server sent SSE headers and a session id but never a result, and clients such as Claude Code timed out. The session is now connected before its first request is handled. The HTTP tests now read the response bodies with a deadline, and CI runs `npm test`, which gates the image publish.
+- `prowlarr_test_indexers` is now flagged `isWrite` (it POSTs `/indexer/testall` and updates indexer status), so it is not advertised `readOnlyHint:true` and is covered by the write guard.
+
+### Added
+- Every flat-mode tool definition now carries the MCP annotation `readOnlyHint = !isWrite`. An explicit annotation on a read tool's definition wins; a write tool is always `false`. Clients that gate on it fail closed for an unannotated tool, so a read-only agent previously received none of this server's tools. The `search`/`fetch` regression-lock snapshot is updated accordingly (a minor-version change by that test's own rule). (#11)
+- `MCP_ARR_TOOLS`: optional comma-separated tool allowlist for running a restricted (e.g. read-only) instance, since the *arr APIs have no read-only keys. Tools outside the list are removed from the registry, so they are absent from `tools/list` and rejected by `tools/call` on every transport. An unknown name, or a set-but-blank value, fails startup (never fails open); not supported with `ARR_TOOL_MODE=progressive`. `/health` now reports `toolCount` and `toolAllowlist`.
 
 ## [1.6.5] - 2026-06-11
 

@@ -217,13 +217,9 @@ test("MCP_ARR_TOOLS limits tools/list and rejects hidden tools on tools/call", a
       method: "tools/call",
       params: { name: "radarr_add_movie", arguments: {} },
     };
-    const toolsList = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };
 
     // stateless (no session id)
-    const listBody = await (await postMcp(port, toolsList)).text();
-    assert.match(listBody, /"arr_status"/);
-    assert.match(listBody, /"radarr_get_movies"/);
-    assert.doesNotMatch(listBody, /radarr_add_movie|"search"|trash_/);
+    assert.deepEqual(Object.keys(await listTools(port)).sort(), ["arr_status", "radarr_get_movies"]);
 
     const callBody = await (await postMcp(port, addCall)).text();
     assert.match(callBody, /not found|Unknown tool/i);
@@ -257,8 +253,7 @@ test("MCP_ARR_TOOLS limits tools/list and rejects hidden tools on tools/call", a
     const sessionId = init.headers.get("mcp-session-id");
     assert.ok(sessionId);
     await init.text();
-    const sessList = await (await postMcp(port, toolsList, sessionId)).text();
-    assert.doesNotMatch(sessList, /radarr_add_movie/);
+    assert.deepEqual(Object.keys(await listTools(port, sessionId)).sort(), ["arr_status", "radarr_get_movies"]);
     const sessCall = await (await postMcp(port, addCall, sessionId)).text();
     assert.match(sessCall, /not found|Unknown tool/i);
     const sessOk = await (await postMcp(port, {
@@ -312,6 +307,72 @@ test("MCP_ARR_TOOLS is rejected with ARR_TOOL_MODE=progressive", async () => {
     { MCP_ARR_TOOLS: "arr_status", ARR_TOOL_MODE: "progressive" },
     /not supported with ARR_TOOL_MODE=progressive/,
   );
+});
+
+// eejd/mcp-arr#11: HTTP tools/list must advertise each tool's real inputSchema (a model needs the
+// parameter names) and a readOnlyHint annotation derived from isWrite (clients that gate on the
+// annotation fail closed for an unannotated tool).
+async function listTools(port, sessionId) {
+  const res = await postMcp(port, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sessionId);
+  const text = await res.text();
+  const data = text.split("\n").find((l) => l.startsWith("data:"));
+  const msg = JSON.parse(data ? data.slice(5) : text);
+  return Object.fromEntries(msg.result.tools.map((t) => [t.name, t]));
+}
+
+test("tools/call arguments reach the handler (session and stateless)", async () => {
+  const port = String(35900 + Math.floor(Math.random() * 90));
+  const env = { ...process.env, MCP_TRANSPORT: "http", HOST: "127.0.0.1", PORT: port,
+    RADARR_URL: "http://127.0.0.1:1", RADARR_API_KEY: "test-key" };
+  delete env.MCP_ARR_TOOLS;
+  const child = spawn(process.execPath, ["dist/index.js"], {
+    cwd: new URL("..", import.meta.url), env, stdio: ["ignore", "ignore", "pipe"] });
+  try {
+    await waitForHealth(port);
+    const init = await postMcp(port, { jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "args-test", version: "0.0.0" } } });
+    const sessionId = init.headers.get("mcp-session-id");
+    await init.text();
+    for (const sid of [undefined, sessionId]) {
+      const res = await postMcp(port, { jsonrpc: "2.0", id: 3, method: "tools/call",
+        params: { name: "fetch", arguments: { id: "zzz:1" } } }, sid);
+      assert.match(await res.text(), /Unsupported fetch id 'zzz:1'/);
+    }
+  } finally {
+    child.kill();
+  }
+});
+
+test("tools/list carries inputSchema and readOnlyHint (real server, both HTTP paths)", async () => {
+  const port = String(35500 + Math.floor(Math.random() * 400));
+  const env = { ...process.env, MCP_TRANSPORT: "http", HOST: "127.0.0.1", PORT: port,
+    RADARR_URL: "http://127.0.0.1:1", RADARR_API_KEY: "test-key" };
+  delete env.MCP_ARR_TOOLS;
+  const child = spawn(process.execPath, ["dist/index.js"], {
+    cwd: new URL("..", import.meta.url), env, stdio: ["ignore", "ignore", "pipe"] });
+  try {
+    await waitForHealth(port);
+    const init = await postMcp(port, { jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "schema-test", version: "0.0.0" } } });
+    const sessionId = init.headers.get("mcp-session-id");
+    await init.text();
+    for (const tools of [await listTools(port), await listTools(port, sessionId)]) {
+      const get = tools["radarr_get_movies"];
+      assert.deepEqual(Object.keys(get.inputSchema.properties).sort(), ["limit", "offset", "search"]);
+      assert.deepEqual(tools["radarr_search"].inputSchema.required, ["term"]);
+      assert.equal(get.annotations.readOnlyHint, true);
+      assert.equal(tools["radarr_search"].annotations.readOnlyHint, true);   // lookup, not a write
+      assert.equal(tools["radarr_add_movie"].annotations.readOnlyHint, false);
+      assert.equal(tools["radarr_delete_queue_item"].annotations.readOnlyHint, false);
+      for (const t of Object.values(tools)) {
+        assert.equal(t.inputSchema.type, "object", t.name);
+        assert.equal(typeof t.annotations.readOnlyHint, "boolean", t.name);
+      }
+    }
+  } finally {
+    child.kill("SIGTERM");
+    await once(child, "exit").catch(() => {});
+  }
 });
 
 async function waitForHealth(port) {
