@@ -101,7 +101,7 @@ export function registerProwlarrTools(registry: ToolRegistry, clients: { prowlar
       };
     },
     capabilityGroup: "prowlarr.library",
-    isWrite: false,
+    isWrite: true, // POSTs /indexer/testall: live traffic to every indexer, updates indexer status,
     alwaysOn: false,
   });
 

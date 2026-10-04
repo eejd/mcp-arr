@@ -217,7 +217,6 @@ test("MCP_ARR_TOOLS limits tools/list and rejects hidden tools on tools/call", a
       method: "tools/call",
       params: { name: "radarr_add_movie", arguments: {} },
     };
-    const toolsList = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };
 
     // stateless (no session id)
     assert.deepEqual(Object.keys(await listTools(port)).sort(), ["arr_status", "radarr_get_movies"]);
@@ -320,6 +319,29 @@ async function listTools(port, sessionId) {
   const msg = JSON.parse(data ? data.slice(5) : text);
   return Object.fromEntries(msg.result.tools.map((t) => [t.name, t]));
 }
+
+test("tools/call arguments reach the handler (session and stateless)", async () => {
+  const port = String(35900 + Math.floor(Math.random() * 90));
+  const env = { ...process.env, MCP_TRANSPORT: "http", HOST: "127.0.0.1", PORT: port,
+    RADARR_URL: "http://127.0.0.1:1", RADARR_API_KEY: "test-key" };
+  delete env.MCP_ARR_TOOLS;
+  const child = spawn(process.execPath, ["dist/index.js"], {
+    cwd: new URL("..", import.meta.url), env, stdio: ["ignore", "ignore", "pipe"] });
+  try {
+    await waitForHealth(port);
+    const init = await postMcp(port, { jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "args-test", version: "0.0.0" } } });
+    const sessionId = init.headers.get("mcp-session-id");
+    await init.text();
+    for (const sid of [undefined, sessionId]) {
+      const res = await postMcp(port, { jsonrpc: "2.0", id: 3, method: "tools/call",
+        params: { name: "fetch", arguments: { id: "zzz:1" } } }, sid);
+      assert.match(await res.text(), /Unsupported fetch id 'zzz:1'/);
+    }
+  } finally {
+    child.kill();
+  }
+});
 
 test("tools/list carries inputSchema and readOnlyHint (real server, both HTTP paths)", async () => {
   const port = String(35500 + Math.floor(Math.random() * 400));
