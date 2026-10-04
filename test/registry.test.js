@@ -240,3 +240,25 @@ describe("ToolRegistry", () => {
     });
   });
 });
+
+
+describe("readOnlyHint annotations (eejd/mcp-arr#11)", () => {
+  it("every tool is annotated readOnlyHint === !isWrite", () => {
+    const registry = buildRegistry();
+    for (const e of registry.all()) {
+      assert.equal(typeof e.definition.annotations?.readOnlyHint, "boolean", e.definition.name);
+      assert.equal(e.definition.annotations.readOnlyHint, !e.isWrite, e.definition.name);
+    }
+    assert.ok(registry.all().some((e) => e.isWrite) && registry.all().some((e) => !e.isWrite));
+  });
+
+  it("an explicit annotation on a definition wins over the derived one", () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      definition: { name: "x", description: "x", inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true, title: "X" } },
+      handler: async () => ({}), capabilityGroup: "core", isWrite: true, alwaysOn: false,
+    });
+    assert.deepEqual(registry.get("x").definition.annotations, { readOnlyHint: true, title: "X" });
+  });
+});

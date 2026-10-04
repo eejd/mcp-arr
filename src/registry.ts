@@ -12,6 +12,12 @@ export class ToolRegistry {
   private entries = new Map<string, ToolEntry>();
 
   register(entry: ToolEntry): void {
+    // MCP readOnlyHint, derived from isWrite unless the definition sets its own. Clients that
+    // gate on it fail closed for an unannotated tool (a read-only agent would get no tools).
+    entry.definition.annotations = {
+      readOnlyHint: !entry.isWrite,
+      ...entry.definition.annotations,
+    };
     this.entries.set(entry.definition.name, entry);
   }
 

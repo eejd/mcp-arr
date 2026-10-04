@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-04
+
+### Fixed
+- HTTP `tools/list` advertised an empty `inputSchema` (`{"type":"object","properties":{}}`) for every tool since the per-session `McpServer` change, because tools were registered with `registerTool` and no schema. A model saw no parameters, and clients validating against the advertised schema validated nothing. HTTP sessions and stateless requests are now served by a low-level `Server` driven by the registry (`definitions()` / `dispatch()`), as stdio flat mode already was, so the real `inputSchema` is returned. Unknown tools now answer with an `isError` result (`Error: Unknown tool: <name>`), as in stdio, instead of a JSON-RPC error. Progressive stdio mode still uses `registerTool` and is unchanged. (#11)
+
+### Added
+- Every tool definition now carries the MCP annotation `readOnlyHint = !isWrite` (an explicit annotation on a definition wins). Clients that gate on it fail closed for an unannotated tool, so a read-only agent previously received none of this server's tools. The `search`/`fetch` regression-lock snapshot is updated accordingly (a minor-version change by that test's own rule). (#11)
+
 ### Added
 - `MCP_ARR_TOOLS`: optional comma-separated tool allowlist for running a restricted (e.g. read-only) instance, since the *arr APIs have no read-only keys. Tools outside the list are removed from the registry, so they are absent from `tools/list` and rejected by `tools/call` on every transport. An unknown name, or a set-but-blank value, fails startup (never fails open); not supported with `ARR_TOOL_MODE=progressive`. `/health` now reports `toolCount` and `toolAllowlist`.
 

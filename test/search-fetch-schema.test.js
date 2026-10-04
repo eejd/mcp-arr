@@ -47,6 +47,8 @@ const EXPECTED_SEARCH = {
     },
     required: ["query"],
   },
+  // 1.7.0 (eejd/mcp-arr#11): every tool carries readOnlyHint = !isWrite; search/fetch are reads.
+  annotations: { readOnlyHint: true },
 };
 
 const EXPECTED_FETCH = {
@@ -63,6 +65,8 @@ const EXPECTED_FETCH = {
     },
     required: ["id"],
   },
+  // 1.7.0 (eejd/mcp-arr#11): every tool carries readOnlyHint = !isWrite; search/fetch are reads.
+  annotations: { readOnlyHint: true },
 };
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
